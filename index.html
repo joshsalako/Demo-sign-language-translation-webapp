@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign Language Translator</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <div class="container">
+        <h1>Sign Language Translator</h1>
+        <div id="video-container">
+            <video id="video" width="640" height="480" autoplay style="display: none;"></video>
+            <canvas id="canvas" width="640" height="480"></canvas>
+        </div>
+        <div id="output-container">
+            <div class="output-box">
+                <h2>Sign to Speech</h2>
+                <div id="sign-to-speech"></div>
+            </div>
+            <div class="output-box">
+                <h2>Speech to Text</h2>
+                <div id="speech-to-text"></div>
+            </div>
+        </div>
+        <div id="button-container">
+            <button id="start-button">Start</button>
+            <button id="stop-button">Stop</button>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.11.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/handpose@0.0.7/dist/handpose.min.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            console.log('DOM fully loaded and parsed');
+
+            const video = document.getElementById('video');
+            const canvas = document.getElementById('canvas');
+            const ctx = canvas.getContext('2d');
+            const startButton = document.getElementById('start-button');
+            const stopButton = document.getElementById('stop-button');
+            const signToSpeechOutput = document.getElementById('sign-to-speech');
+            const speechToTextOutput = document.getElementById('speech-to-text');
+
+            console.log('All elements retrieved from DOM');
+
+            let model;
+            let synth = window.speechSynthesis;
+            let recognition;
+            let isRunning = false;
+            let animationFrameId;
+            let lastGesture = '';
+            let isSignToSpeechActive = false;
+
+            startButton.addEventListener('click', startTranslation);
+            stopButton.addEventListener('click', stopTranslation);
+
+            console.log('Event listeners added to buttons');
+
+            async function startTranslation() {
+                console.log("Start button clicked");
+                if (isRunning) {
+                    console.log("Already running, ignoring start click");
+                    return;
+                }
+
+                try {
+                    startButton.disabled = true;
+                    stopButton.disabled = false;
+
+                    console.log("Loading handpose model...");
+                    model = await handpose.load();
+                    console.log("Handpose model loaded successfully");
+
+                    console.log("Attempting to access camera...");
+                    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                    video.srcObject = stream;
+                    console.log("Camera accessed successfully");
+
+                    isRunning = true;
+                    video.addEventListener('loadeddata', predictHands);
+
+                    // Initialize speech recognition
+                    console.log("Initializing speech recognition...");
+                    recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+                    recognition.continuous = true;
+                    recognition.interimResults = true;
+                    recognition.lang = 'en-US';
+
+                    recognition.onresult = (event) => {
+                        console.log("Speech recognition result received");
+                        let interimTranscript = '';
+                        let finalTranscript = '';
+
+                        for (let i = event.resultIndex; i < event.results.length; i++) {
+                            const transcript = event.results[i][0].transcript;
+                            if (event.results[i].isFinal) {
+                                finalTranscript += transcript + ' ';
+                            } else {
+                                interimTranscript += transcript;
+                            }
+                        }
+
+                        if (finalTranscript && !isSignToSpeechActive) {
+                            console.log("Final transcript:", finalTranscript);
+                            addSpeechToTextOutput(finalTranscript);
+                        }
+
+                        // Display interim results only if not during sign-to-speech
+                        if (!isSignToSpeechActive) {
+                            if (speechToTextOutput.lastChild) {
+                                speechToTextOutput.lastChild.textContent = interimTranscript;
+                            } else {
+                                console.log("No last child in speechToTextOutput");
+                            }
+                        }
+                    };
+
+                    recognition.start();
+                    console.log("Speech recognition started");
+
+                } catch (err) {
+                    console.error('Error:', err);
+                    startButton.disabled = false;
+                    stopButton.disabled = true;
+                }
+            }
+
+            function stopTranslation() {
+                console.log("Stop button clicked");
+                if (!isRunning) {
+                    console.log("Not running, ignoring stop click");
+                    return;
+                }
+                isRunning = false;
+                if (video.srcObject) {
+                    video.srcObject.getTracks().forEach(track => track.stop());
+                }
+                cancelAnimationFrame(animationFrameId);
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                if (recognition) {
+                    recognition.stop();
+                }
+                startButton.disabled = false;
+                stopButton.disabled = true;
+                console.log("Translation stopped");
+            }
+
+            async function predictHands() {
+                if (!isRunning) {
+                    console.log("Not running, stopping hand prediction");
+                    return;
+                }
+
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                const predictions = await model.estimateHands(video);
+
+                if (predictions.length > 0) {
+                    console.log("Hand detected");
+                    drawHand(predictions[0].landmarks);
+                    const gesture = recognizeGesture(predictions[0].landmarks);
+                    if (gesture && gesture !== lastGesture) {
+                        console.log("Gesture recognized:", gesture);
+                        addSignToSpeechOutput(gesture);
+                        speakText(gesture);
+                        lastGesture = gesture;
+                    }
+                } else {
+                    lastGesture = '';
+                }
+
+                animationFrameId = requestAnimationFrame(predictHands);
+            }
+
+            function drawHand(landmarks) {
+                for (let i = 0; i < landmarks.length; i++) {
+                    const [x, y] = landmarks[i];
+                    ctx.beginPath();
+                    ctx.arc(x, y, 5, 0, 2 * Math.PI);
+                    ctx.fillStyle = 'red';
+                    ctx.fill();
+                }
+            }
+
+            function recognizeGesture(landmarks) {
+                const thumbTip = landmarks[4];
+                const indexTip = landmarks[8];
+                const middleTip = landmarks[12];
+                const ringTip = landmarks[16];
+                const pinkyTip = landmarks[20];
+
+                const thumbIndexDistance = getDistance(thumbTip, indexTip);
+                const indexMiddleDistance = getDistance(indexTip, middleTip);
+                const middleRingDistance = getDistance(middleTip, ringTip);
+                const ringPinkyDistance = getDistance(ringTip, pinkyTip);
+
+                // Threshold for considering fingers as "closed"
+                const closedThreshold = 30;
+
+                // Check for various gestures
+                if (thumbIndexDistance < closedThreshold && indexMiddleDistance > 100) {
+                    return "Hello";
+                } else if (thumbIndexDistance < closedThreshold && indexMiddleDistance < closedThreshold) {
+                    return "Thank you";
+                } else if (allFingersExtended(landmarks)) {
+                    return "Stop";
+                } else if (onlyIndexExtended(landmarks)) {
+                    return "One";
+                } else if (onlyIndexAndMiddleExtended(landmarks)) {
+                    return "Peace";
+                } else if (thumbUpGesture(landmarks)) {
+                    return "Good";
+                }
+
+                return null;
+            }
+
+            function allFingersExtended(landmarks) {
+                const fingerTips = [8, 12, 16, 20];
+                const palmBase = landmarks[0];
+                return fingerTips.every(tip => landmarks[tip][1] < palmBase[1]);
+            }
+
+            function onlyIndexExtended(landmarks) {
+                const fingerTips = [8, 12, 16, 20];
+                const palmBase = landmarks[0];
+                return landmarks[8][1] < palmBase[1] &&
+                    fingerTips.slice(1).every(tip => landmarks[tip][1] > palmBase[1]);
+            }
+
+            function onlyIndexAndMiddleExtended(landmarks) {
+                const fingerTips = [8, 12, 16, 20];
+                const palmBase = landmarks[0];
+                return landmarks[8][1] < palmBase[1] &&
+                    landmarks[12][1] < palmBase[1] &&
+                    fingerTips.slice(2).every(tip => landmarks[tip][1] > palmBase[1]);
+            }
+
+            function thumbUpGesture(landmarks) {
+                const thumbTip = landmarks[4];
+                const indexKnuckle = landmarks[5];
+                return thumbTip[1] < indexKnuckle[1] &&
+                    [8, 12, 16, 20].every(tip => landmarks[tip][1] > indexKnuckle[1]);
+            }
+
+            function getDistance(point1, point2) {
+                return Math.sqrt(
+                    Math.pow(point1[0] - point2[0], 2) +
+                    Math.pow(point1[1] - point2[1], 2)
+                );
+            }
+
+            function speakText(text) {
+                if (synth.speaking) {
+                    console.log('Still speaking...');
+                    return;
+                }
+                isSignToSpeechActive = true;
+                const utterance = new SpeechSynthesisUtterance(text);
+                utterance.onend = () => {
+                    isSignToSpeechActive = false;
+                };
+                synth.speak(utterance);
+                console.log("Speaking:", text);
+            }
+
+            function addSignToSpeechOutput(text) {
+                const p = document.createElement('p');
+                p.textContent = text;
+                signToSpeechOutput.appendChild(p);
+                signToSpeechOutput.scrollTop = signToSpeechOutput.scrollHeight;
+                console.log("Added to sign-to-speech output:", text);
+            }
+
+            function addSpeechToTextOutput(text) {
+                const p = document.createElement('p');
+                p.textContent = text;
+                speechToTextOutput.appendChild(p);
+                speechToTextOutput.scrollTop = speechToTextOutput.scrollHeight;
+                console.log("Added to speech-to-text output:", text);
+            }
+
+            console.log('Script fully loaded');
+        });
+    </script>
+</body>
+
+</html>
